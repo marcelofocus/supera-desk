@@ -48,6 +48,7 @@ env:
   CARGO_EXPAND_VERSION: "1.0.95"
   VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  WINDOWS_PFX_BASE64: "${{ secrets.WINDOWS_PFX_BASE64 }}"
 
 jobs:
   # ============================================================================
@@ -269,7 +270,7 @@ jobs:
           path: rustdesk-src/dist_win
 
       - name: Optional Authenticode Signing (Inner Binaries)
-        if: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
+        if: env.WINDOWS_PFX_BASE64 != ''
         working-directory: rustdesk-src
         env:
           PFX_B64: ${{ secrets.WINDOWS_PFX_BASE64 }}
@@ -305,7 +306,7 @@ jobs:
           ls -lh ../out-windows/
 
       - name: Optional Authenticode Signing (Outer Setup .EXE & .MSI)
-        if: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
+        if: env.WINDOWS_PFX_BASE64 != ''
         env:
           PFX_B64: ${{ secrets.WINDOWS_PFX_BASE64 }}
           PFX_PASS: ${{ secrets.WINDOWS_PFX_PASSWORD }}
@@ -450,16 +451,21 @@ jobs:
           path: release-dist
           merge-multiple: true
 
-      - name: Generate SHA-256 Checksums
+      - name: Generate SHA-256 Checksums & Release Tag
         working-directory: release-dist
         run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=v${SUPERA_VERSION}" >> "$GITHUB_ENV"
+          fi
           sha256sum Supera-Desk-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', env.SUPERA_VERSION) }}
+          tag_name: ${{ env.RELEASE_TAG }}
           name: "Supera-Desk v${{ env.SUPERA_VERSION }} (Pré-Configurado: ${{ env.SUPERA_ID_SERVER }})"
           prerelease: false
           body: |
