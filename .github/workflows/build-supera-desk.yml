@@ -23,6 +23,10 @@ on:
         description: "Publicar binários em GitHub Releases"
         type: boolean
         default: true
+      skip_macos:
+        description: "Pular build macOS caso .DMG já esteja publicado na Release"
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -260,9 +264,28 @@ jobs:
         working-directory: rustdesk-src
         shell: pwsh
         run: |
+          # Atualiza flutter_gpu_texture_renderer p/ MSVC 2022 17.13+ (#include <chrono>)
+          (Get-Content flutter/pubspec.yaml -Raw).Replace('2ded7f146437a761ffe6981e2f742038f85ca68d', '08a471bb8ceccdd50483c81cdfa8b81b07b14b87') | Set-Content flutter/pubspec.yaml -NoNewline
+          if (Test-Path flutter/pubspec.lock) {
+            Remove-Item flutter/pubspec.lock -Force
+          }
+          Push-Location flutter
+          flutter pub get
+          Pop-Location
+          Get-ChildItem -Path "$env:LOCALAPPDATA\Pub\Cache\git" -Recurse -Filter "d3d11_output.cpp" -ErrorAction SilentlyContinue | ForEach-Object {
+            $cpp = Get-Content $_.FullName -Raw
+            if ($cpp -notmatch '#include\s*<chrono>') {
+              Set-Content $_.FullName -Value ("#include <chrono>`r`n" + $cpp) -NoNewline
+            }
+          }
+
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          if (-not (Test-Path ./flutter/build/windows/x64/runner/Release/rustdesk.exe)) {
+            Write-Error "Falha na compilacao do runner Windows"
+            exit 1
+          }
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse -Force
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat" -Force
           Move-Item ./flutter/build/windows/x64/runner/Release ./dist_win
@@ -338,6 +361,7 @@ jobs:
   build-macos-arm64:
     name: "Supera-Desk macOS Apple Silicon (.DMG)"
     needs: [generate-bridge]
+    if: ${{ inputs.skip_macos != true }}
     runs-on: macos-15
     steps:
       - name: Export GitHub Actions Cache Variables
@@ -463,14 +487,23 @@ jobs:
   publish-release:
     name: "Publish Supera-Desk Release"
     needs: [build-windows-x64, build-macos-arm64]
-    if: ${{ !cancelled() && (needs.build-windows-x64.result == 'success' || needs.build-macos-arm64.result == 'success') && (github.event_name == 'push' || inputs.publish_release != false) }}
+    if: ${{ always() && !cancelled() && (needs.build-windows-x64.result == 'success' || needs.build-macos-arm64.result == 'success') && (github.event_name == 'push' || inputs.publish_release != false) }}
     runs-on: ubuntu-22.04
     steps:
       - name: Download All Compiled Binaries
         uses: actions/download-artifact@v4
         with:
+          pattern: "Supera-Desk-*"
           path: release-dist
           merge-multiple: true
+
+      - name: Include Existing Release DMG in Checksums (if macOS skipped)
+        working-directory: release-dist
+        run: |
+          if [ ! -f Supera-Desk-Mac-AppleSilicon.dmg ]; then
+            curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${SUPERA_VERSION}/Supera-Desk-Mac-AppleSilicon.dmg" \
+              -o Supera-Desk-Mac-AppleSilicon.dmg || true
+          fi
 
       - name: Generate SHA-256 Checksums & Release Tag
         working-directory: release-dist
