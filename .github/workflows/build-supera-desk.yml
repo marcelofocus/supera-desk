@@ -243,11 +243,12 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg Native Dependencies (FFmpeg / Hardware Codec / Opus / Libvpx)
+        working-directory: rustdesk-src
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         shell: bash
         run: |
-          $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Build Supera-Desk Core & Flutter Runner
         working-directory: rustdesk-src
@@ -366,9 +367,13 @@ jobs:
           path: rustdesk-src
 
       - name: Install Build Dependencies (Homebrew)
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          brew install llvm create-dmg nasm cmake gcc wget ninja
-          command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
+          for pkg in llvm create-dmg nasm cmake wget ninja pkg-config; do
+            brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+          done
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -405,6 +410,9 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg Native Dependencies (arm64-osx)
+        working-directory: rustdesk-src
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: arm64-osx
         run: |
           "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx --x-install-root="$VCPKG_ROOT/installed"
 
