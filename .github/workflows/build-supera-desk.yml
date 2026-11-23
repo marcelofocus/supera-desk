@@ -332,7 +332,7 @@ jobs:
   build-macos-arm64:
     name: "Supera-Desk macOS Apple Silicon (.DMG)"
     needs: [generate-bridge]
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Export GitHub Actions Cache Variables
         uses: actions/github-script@v7
@@ -450,7 +450,7 @@ jobs:
   publish-release:
     name: "Publish Supera-Desk Release"
     needs: [build-windows-x64, build-macos-arm64]
-    if: ${{ github.event_name == 'push' || inputs.publish_release != false }}
+    if: ${{ !cancelled() && (needs.build-windows-x64.result == 'success' || needs.build-macos-arm64.result == 'success') && (github.event_name == 'push' || inputs.publish_release != false) }}
     runs-on: ubuntu-22.04
     steps:
       - name: Download All Compiled Binaries
@@ -485,7 +485,5 @@ jobs:
             - **Windows 10/11 (x64)**: `Supera-Desk-Setup-Win64.exe` (Portátil + Instalador 1-Clique com Serviço Windows & Firewall automático) e `Supera-Desk-Win64.msi` (GPO/AD).
             - **macOS (Apple Silicon M1/M2/M3/M4)**: `Supera-Desk-Mac-AppleSilicon.dmg` (Nativo ARM64 com ScreenCaptureKit + VideoToolbox).
           files: |
-            release-dist/Supera-Desk-Setup-Win64.exe
-            release-dist/Supera-Desk-Win64.msi
-            release-dist/Supera-Desk-Mac-AppleSilicon.dmg
+            release-dist/Supera-Desk-*
             release-dist/SHA256SUMS.txt
