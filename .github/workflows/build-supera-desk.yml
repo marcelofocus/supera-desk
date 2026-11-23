@@ -1,0 +1,477 @@
+name: Build Supera-Desk (Windows x64 & macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      supera_version:
+        description: "Versão do Supera-Desk"
+        required: false
+        default: "1.3.8"
+      id_server:
+        description: "Servidor ID privado (hbbs)"
+        required: false
+        default: "superadesk.ipog.cloud"
+      relay_server:
+        description: "Servidor Relay privado (hbbr)"
+        required: false
+        default: "superadesk.ipog.cloud"
+      pub_key:
+        description: "Chave Pública Ed25519 (id_ed25519.pub)"
+        required: false
+        default: "MwoPxCW4rXbAXrMf0F9Mmo5NOqpYp1EVtTZAeJORUpo="
+      publish_release:
+        description: "Publicar binários em GitHub Releases"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  RUSTDESK_UPSTREAM_TAG: "1.3.8"
+  SUPERA_VERSION: "${{ inputs.supera_version || '1.3.8' }}"
+  SUPERA_APP_NAME: "Supera-Desk"
+  SUPERA_ORG: "br.com.focusolution"
+  SUPERA_ID_SERVER: "${{ inputs.id_server || 'superadesk.ipog.cloud' }}"
+  SUPERA_RELAY_SERVER: "${{ inputs.relay_server || 'superadesk.ipog.cloud' }}"
+  SUPERA_PUB_KEY: "${{ inputs.pub_key || 'MwoPxCW4rXbAXrMf0F9Mmo5NOqpYp1EVtTZAeJORUpo=' }}"
+  SUPERA_PORTAL_URL: "https://supera.ipog.cloud"
+  WIN_RUST_VERSION: "1.75"
+  MAC_RUST_VERSION: "1.81"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  # ============================================================================
+  # 1. Gera os bindings FFI Rust <-> Flutter já com os patches do Supera-Desk
+  # ============================================================================
+  generate-bridge:
+    name: "Bridge FFI (Rust <-> Flutter)"
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Supera-Desk Factory
+        uses: actions/checkout@v4
+        with:
+          path: supera-desk-factory
+
+      - name: Checkout Upstream RustDesk 1.3.8
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_UPSTREAM_TAG }}
+          submodules: recursive
+          path: rustdesk-src
+
+      - name: Apply Supera-Desk White-Label Branding
+        run: |
+          python3 supera-desk-factory/scripts/apply_supera_branding.py \
+            --rustdesk-dir rustdesk-src \
+            --assets-dir supera-desk-factory/assets
+
+      - name: Install System Prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake curl gcc git g++ \
+            libclang-dev libgtk-3-dev llvm-dev \
+            nasm ninja-build pkg-config wget
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.WIN_RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rustdesk-src -> target"
+          prefix-key: bridge-ubuntu22
+
+      - name: Install Flutter for Bridge Codegen
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+
+      - name: Generate Flutter Rust Bridge
+        working-directory: rustdesk-src
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          pushd flutter
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml
+          flutter pub get
+          popd
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - name: Upload Bridge Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            rustdesk-src/src/bridge_generated.rs
+            rustdesk-src/src/bridge_generated.io.rs
+            rustdesk-src/flutter/lib/generated_bridge.dart
+            rustdesk-src/flutter/lib/generated_bridge.freezed.dart
+            rustdesk-src/flutter/macos/Runner/bridge_generated.h
+            rustdesk-src/flutter/ios/Runner/bridge_generated.h
+
+  # ============================================================================
+  # 2. Compila DLL auxiliar de janela sobreposta UAC/Privacidade do Windows
+  # ============================================================================
+  build-topmost-window:
+    name: "Windows TopMost Helper DLL"
+    runs-on: windows-2022
+    steps:
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build WindowInjection.dll
+        shell: pwsh
+        run: |
+          git clone https://github.com/rustdesk-org/RustDeskTempTopMostWindow
+          cd RustDeskTempTopMostWindow
+          git checkout 53b548a5398624f7149a382000397993542ad796
+          msbuild WindowInjection/WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+
+      - name: Upload WindowInjection Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: topmostwindow-artifacts
+          path: RustDeskTempTopMostWindow/WindowInjection/x64/Release/WindowInjection.dll
+
+  # ============================================================================
+  # 3. Compila Supera-Desk para Windows 10/11 x64 (.EXE Portátil/Instalador + .MSI)
+  # ============================================================================
+  build-windows-x64:
+    name: "Supera-Desk Windows x64 (.EXE & .MSI)"
+    needs: [generate-bridge, build-topmost-window]
+    runs-on: windows-2022
+    steps:
+      - name: Export GitHub Actions Cache Variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout Supera-Desk Factory
+        uses: actions/checkout@v4
+        with:
+          path: supera-desk-factory
+
+      - name: Checkout Upstream RustDesk 1.3.8
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_UPSTREAM_TAG }}
+          submodules: recursive
+          path: rustdesk-src
+
+      - name: Apply Supera-Desk White-Label Branding
+        shell: bash
+        run: |
+          python3 supera-desk-factory/scripts/apply_supera_branding.py \
+            --rustdesk-dir rustdesk-src \
+            --assets-dir supera-desk-factory/assets
+
+      - name: Restore Bridge Files
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk-src
+
+      - name: Install LLVM & Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Apply Custom Windows Flutter Engine & Dropdown Patch
+        working-directory: rustdesk-src
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          $flutterBin = (Get-Command flutter).Source
+          $flutterRoot = Split-Path (Split-Path $flutterBin -Parent) -Parent
+          Copy-Item -Path "windows-x64-release/*" -Destination "$flutterRoot/bin/cache/artifacts/engine/windows-x64-release/" -Recurse -Force
+          Copy-Item ".github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff" "$flutterRoot/" -Force
+          Push-Location $flutterRoot
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          Pop-Location
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.WIN_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rustdesk-src -> target"
+          prefix-key: supera-win-x64
+
+      - name: Setup vcpkg with Binary Cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg Native Dependencies (FFmpeg / Hardware Codec / Opus / Libvpx)
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        shell: bash
+        run: |
+          $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build Supera-Desk Core & Flutter Runner
+        working-directory: rustdesk-src
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse -Force
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat" -Force
+          Move-Item ./flutter/build/windows/x64/runner/Release ./dist_win
+          Move-Item -Force .\usbmmidd_v2 ./dist_win
+          # Renomeia o executável interno para Supera-Desk.exe para casar 100% com o Windows Service & Firewall!
+          Move-Item -Force ./dist_win/rustdesk.exe ./dist_win/Supera-Desk.exe
+
+      - name: Bundle WindowInjection.dll
+        uses: actions/download-artifact@v4
+        with:
+          name: topmostwindow-artifacts
+          path: rustdesk-src/dist_win
+
+      - name: Optional Authenticode Signing (Inner Binaries)
+        if: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
+        working-directory: rustdesk-src
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1 -ExpandProperty FullName
+          & $signtool sign /fd SHA256 /f cert.pfx /p $env:PFX_PASS /tr http://timestamp.digicert.com /td SHA256 .\dist_win\Supera-Desk.exe .\dist_win\librustdesk.dll
+          Remove-Item cert.pfx -Force
+
+      - name: Pack Single-File Supera-Desk-Setup-Win64.exe & Corporate .MSI
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate Supera-Desk-Setup-Win64.exe and Supera-Desk-Win64.msi
+        working-directory: rustdesk-src
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../dist_win/ -o . -e ../../dist_win/Supera-Desk.exe
+          popd
+          mkdir -p ../out-windows
+          cp ./target/release/rustdesk-portable-packer.exe ../out-windows/Supera-Desk-Setup-Win64.exe
+
+          pushd ./res/msi
+          python preprocess.py --arp --app-name Supera-Desk -d ../../dist_win
+          nuget restore msi.sln
+          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+          cp ./Package/bin/x64/Release/en-us/Package.msi ../../../out-windows/Supera-Desk-Win64.msi
+          popd
+          ls -lh ../out-windows/
+
+      - name: Optional Authenticode Signing (Outer Setup .EXE & .MSI)
+        if: ${{ secrets.WINDOWS_PFX_BASE64 != '' }}
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1 -ExpandProperty FullName
+          & $signtool sign /fd SHA256 /f cert.pfx /p $env:PFX_PASS /tr http://timestamp.digicert.com /td SHA256 .\out-windows\Supera-Desk-Setup-Win64.exe .\out-windows\Supera-Desk-Win64.msi
+          Remove-Item cert.pfx -Force
+
+      - name: Upload Supera-Desk Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Supera-Desk-Windows-x64
+          path: |
+            out-windows/Supera-Desk-Setup-Win64.exe
+            out-windows/Supera-Desk-Win64.msi
+
+  # ============================================================================
+  # 4. Compila Supera-Desk para macOS (Apple Silicon M1/M2/M3/M4 arm64 .DMG)
+  # ============================================================================
+  build-macos-arm64:
+    name: "Supera-Desk macOS Apple Silicon (.DMG)"
+    needs: [generate-bridge]
+    runs-on: macos-14
+    steps:
+      - name: Export GitHub Actions Cache Variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout Supera-Desk Factory
+        uses: actions/checkout@v4
+        with:
+          path: supera-desk-factory
+
+      - name: Checkout Upstream RustDesk 1.3.8
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.RUSTDESK_UPSTREAM_TAG }}
+          submodules: recursive
+          path: rustdesk-src
+
+      - name: Apply Supera-Desk White-Label Branding
+        run: |
+          python3 supera-desk-factory/scripts/apply_supera_branding.py \
+            --rustdesk-dir rustdesk-src \
+            --assets-dir supera-desk-factory/assets
+
+      - name: Restore Bridge Files
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk-src
+
+      - name: Install Build Dependencies (Homebrew)
+        run: |
+          brew install llvm create-dmg nasm cmake gcc wget ninja
+          command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Patch Flutter macOS Scheduler & Dropdown
+        shell: bash
+        run: |
+          FLUTTER_ROOT="$(dirname "$(dirname "$(which flutter)")")"
+          cp "${{ github.workspace }}/rustdesk-src/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff" "$FLUTTER_ROOT/"
+          pushd "$FLUTTER_ROOT"
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          sed -i '' -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' packages/flutter/lib/src/scheduler/binding.dart
+          popd
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: aarch64-apple-darwin
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rustdesk-src -> target"
+          prefix-key: supera-macos-arm64
+
+      - name: Setup vcpkg with Binary Cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg Native Dependencies (arm64-osx)
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build Supera-Desk.app (Apple Silicon Native + ScreenCaptureKit + VideoToolbox GPU)
+        working-directory: rustdesk-src
+        shell: bash
+        run: |
+          MIN_MACOS_VERSION="12.3"
+          sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
+          sed -i '' -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
+          sed -i '' -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
+          sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
+          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
+
+          # Assinatura Ad-Hoc (ou Developer ID caso MACOS_CODESIGN_IDENTITY esteja configurado)
+          APP_BUNDLE="./flutter/build/macos/Build/Products/Release/Supera-Desk.app"
+          codesign --force --deep -s - "$APP_BUNDLE"
+
+          mkdir -p ../out-macos
+          hdiutil create -volname "Supera-Desk" \
+            -srcfolder "$APP_BUNDLE" \
+            -ov -format UDZO \
+            ../out-macos/Supera-Desk-Mac-AppleSilicon.dmg
+          ls -lh ../out-macos/
+
+      - name: Upload Supera-Desk macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Supera-Desk-macOS-AppleSilicon
+          path: out-macos/Supera-Desk-Mac-AppleSilicon.dmg
+
+  # ============================================================================
+  # 5. Publica Release Oficial no GitHub (consumida direto pelo Supera ERP!)
+  # ============================================================================
+  publish-release:
+    name: "Publish Supera-Desk Release"
+    needs: [build-windows-x64, build-macos-arm64]
+    if: ${{ github.event_name == 'push' || inputs.publish_release != false }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download All Compiled Binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        working-directory: release-dist
+        run: |
+          sha256sum Supera-Desk-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', env.SUPERA_VERSION) }}
+          name: "Supera-Desk v${{ env.SUPERA_VERSION }} (Pré-Configurado: ${{ env.SUPERA_ID_SERVER }})"
+          prerelease: false
+          body: |
+            ### 🖥️ Supera-Desk v${{ env.SUPERA_VERSION }} — Cliente Oficial de Suporte Remoto Corporativo
+            Binários nativos **100% White-Label Supera ERP** compilados com aceleração por hardware GPU e pré-configurados de fábrica:
+            - **Servidor ID (`hbbs`)**: `${{ env.SUPERA_ID_SERVER }}`
+            - **Servidor Relay (`hbbr`)**: `${{ env.SUPERA_RELAY_SERVER }}`
+            - **Protocolos URI**: `supera-desk://` e `superadesk://`
+            - **Windows 10/11 (x64)**: `Supera-Desk-Setup-Win64.exe` (Portátil + Instalador 1-Clique com Serviço Windows & Firewall automático) e `Supera-Desk-Win64.msi` (GPO/AD).
+            - **macOS (Apple Silicon M1/M2/M3/M4)**: `Supera-Desk-Mac-AppleSilicon.dmg` (Nativo ARM64 com ScreenCaptureKit + VideoToolbox).
+          files: |
+            release-dist/Supera-Desk-Setup-Win64.exe
+            release-dist/Supera-Desk-Win64.msi
+            release-dist/Supera-Desk-Mac-AppleSilicon.dmg
+            release-dist/SHA256SUMS.txt

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 120" width="600" height="120">
+  <defs>
+    <linearGradient id="sBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A1A34"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="10" width="100" height="100" rx="24" fill="url(#sBg)"/>
+  <rect x="25" y="28" width="66" height="48" rx="9" fill="none" stroke="#7DD3FC" stroke-width="7"/>
+  <line x1="58" y1="76" x2="58" y2="90" stroke="#38BDF8" stroke-width="6.5" stroke-linecap="round"/>
+  <line x1="40" y1="91" x2="76" y2="91" stroke="#38BDF8" stroke-width="6" stroke-linecap="round"/>
+  <polygon points="46,41 75,54 57,60 51,72" fill="#FFFFFF"/>
+  <text x="128" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="46" font-weight="800" fill="#0284C7" letter-spacing="-0.5">SUPERA<tspan fill="#38BDF8">-DESK</tspan></text>
+  <text x="130" y="95" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#64748B" letter-spacing="1.8">SUPORTE REMOTO CORPORATIVO</text>
+</svg>
