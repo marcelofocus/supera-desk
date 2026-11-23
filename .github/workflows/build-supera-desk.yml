@@ -6,7 +6,7 @@ on:
       supera_version:
         description: "Versão do Supera-Desk"
         required: false
-        default: "1.3.8"
+        default: "1.3.9"
       id_server:
         description: "Servidor ID privado (hbbs)"
         required: false
@@ -36,7 +36,7 @@ permissions:
 
 env:
   RUSTDESK_UPSTREAM_TAG: "1.3.8"
-  SUPERA_VERSION: "${{ inputs.supera_version || '1.3.8' }}"
+  SUPERA_VERSION: "${{ inputs.supera_version || '1.3.9' }}"
   SUPERA_APP_NAME: "Supera-Desk"
   SUPERA_ORG: "br.com.focusolution"
   SUPERA_ID_SERVER: "${{ inputs.id_server || 'superadesk.ipog.cloud' }}"

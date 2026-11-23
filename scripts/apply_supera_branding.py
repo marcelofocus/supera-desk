@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Aplicador determinístico de White-Label e Infraestrutura Privada do Supera-Desk
-sobre a árvore upstream do RustDesk 1.3.8 (Rust + Flutter Desktop Windows x64 e macOS arm64/x86_64).
+Aplicador determinístico de White-Label, Acesso Corporativo Sem Clique e Auto-Registro Heartbeat
+do Supera-Desk sobre a árvore upstream do RustDesk 1.3.8 (Rust + Flutter Desktop Windows x64 e macOS arm64).
 
-Garantias arquiteturais:
+Garantias arquiteturais (v1.3.9+):
 1. Servidor ID (`hbbs`), Relay (`hbbr`) e Chave Pública Ed25519 compilados nativamente no binário
-   (`superadesk.ipog.cloud` + `MwoPxCW4rXbAXrMf0F9Mmo5NOqpYp1EVtTZAeJORUpo=`, parametrizáveis via ENV p/ multi-clientes focuSolution);
-2. Identidade 100% Supera-Desk (`APP_NAME = "Supera-Desk"`, `ORG = "br.com.focusolution"`, zero menção a
-   "Powered by RustDesk", zero link `rustdesk.com`, zero erro de "API server" em porta 21114);
-3. Interface Desktop completa de mão dupla (`Mac -> Windows` e `Windows -> Windows`) com codec GPU (`hwcodec`),
-   conexão UDP direta (`direct-server = Y`) e protocolo URI `supera-desk://` + `superadesk://` (com suporte a `?password=`);
-4. Instalação Windows cria Serviço `Supera-Desk` (`start= auto`) e libera automaticamente Firewall de Entrada e Saída (`profile=any`).
+   (`superadesk.ipog.cloud` + `MwoPxCW4rXbAXrMf0F9Mmo5NOqpYp1EVtTZAeJORUpo=`, parametrizáveis via ENV);
+2. Identidade 100% Supera-Desk (`APP_NAME = "Supera-Desk"`, `ORG = "br.com.focusolution"`), inclusive
+   aba `Sobre Supera-Desk` 100% institucional focuSolution / Supera ERP e `Data da Build` em GMT-3;
+3. Senha Corporativa de Suporte derivada criptograficamente via SHA-256 em tempo de execução (zero texto
+   puro em `.rodata` e zero clique de aprovação no Windows em conexões `Mac -> Windows` / `Windows -> Windows`);
+4. Auto-Registro & Heartbeat nativo HTTPS (`/supera/desk/heartbeat`) com captura automática de token `stok=`
+   no nome do executável baixado em `/suporte/<token>`, permitindo suporte em menos de 1 minuto para leigos!
 """
 import argparse
 import os
@@ -25,6 +26,24 @@ def _replace_exact(content: str, target: str, replacement: str, label: str) -> s
     if target not in content:
         raise RuntimeError(f"[Supera-Desk Patch Error] Trecho esperado não encontrado em {label}:\n{target!r}")
     return content.replace(target, replacement, 1)
+
+
+def patch_versions(cargo_toml: Path, pubspec_yaml: Path, cfg: dict[str, str]) -> None:
+    ver = cfg["supera_version"]
+    company = cfg["company_name"]
+    app_name = cfg["app_name"]
+
+    if cargo_toml.is_file():
+        ct = cargo_toml.read_text(encoding="utf-8")
+        ct = _replace_exact(ct, 'version = "1.3.8"', f'version = "{ver}"', "Cargo.toml::version")
+        ct = ct.replace('authors = ["rustdesk <info@rustdesk.com>"]', f'authors = ["{company} <suporte@focusolution.com.br>"]')
+        ct = ct.replace('description = "RustDesk Remote Desktop"', f'description = "{app_name} - Suporte Remoto Corporativo"')
+        cargo_toml.write_text(ct, encoding="utf-8")
+
+    if pubspec_yaml.is_file():
+        ps = pubspec_yaml.read_text(encoding="utf-8")
+        ps = re.sub(r"^version:\s*1\.3\.8\+\d+", f"version: {ver}+58", ps, count=1, flags=re.MULTILINE)
+        pubspec_yaml.write_text(ps, encoding="utf-8")
 
 
 def patch_hbb_common_config(path: Path, cfg: dict[str, str]) -> None:
@@ -65,10 +84,27 @@ def patch_hbb_common_config(path: Path, cfg: dict[str, str]) -> None:
             '        ("direct-server".to_owned(), "Y".to_owned()),\n'
             '        ("enable-hwcodec".to_owned(), "Y".to_owned()),\n'
             '        ("enable-abr".to_owned(), "Y".to_owned()),\n'
+            '        ("approve-mode".to_owned(), "both".to_owned()),\n'
             '        ("verification-method".to_owned(), "use-both-passwords".to_owned()),\n'
+            '        ("access-mode".to_owned(), "full".to_owned()),\n'
+            '        ("enable-keyboard".to_owned(), "Y".to_owned()),\n'
+            '        ("enable-clipboard".to_owned(), "Y".to_owned()),\n'
+            '        ("enable-file-transfer".to_owned(), "Y".to_owned()),\n'
+            '        ("enable-remote-restart".to_owned(), "Y".to_owned()),\n'
+            '        ("allow-remote-config-modification".to_owned(), "Y".to_owned()),\n'
             "    ]));"
         ),
         "config.rs::DEFAULT_SETTINGS",
+    )
+    src = _replace_exact(
+        src,
+        'pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
+        (
+            "pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([\n"
+            '        ("password".to_owned(), supera_corporate_support_key()),\n'
+            "    ]));"
+        ),
+        "config.rs::HARD_SETTINGS",
     )
     src = _replace_exact(
         src,
@@ -76,7 +112,6 @@ def patch_hbb_common_config(path: Path, cfg: dict[str, str]) -> None:
         (
             "pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([\n"
             '        ("remove-preset-password-warning".to_owned(), "Y".to_owned()),\n'
-            '        ("hide-help-cards".to_owned(), "Y".to_owned()),\n'
             "    ]));"
         ),
         "config.rs::BUILTIN_SETTINGS",
@@ -102,15 +137,107 @@ def patch_hbb_common_config(path: Path, cfg: dict[str, str]) -> None:
     src = _replace_exact(
         src,
         'pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";',
-        f'pub const RS_PUB_KEY: &str = "{pub_key}";',
+        (
+            f'pub const RS_PUB_KEY: &str = "{pub_key}";\n'
+            f'pub const SUPERA_PORTAL_BASE_URL: &str = "{portal_url}";\n\n'
+            "pub fn supera_corporate_support_key() -> String {\n"
+            "    use crate::sha2::{Digest, Sha256};\n"
+            "    let mut hasher = Sha256::new();\n"
+            '    hasher.update(b"SuperaDesk::UnattendedCorpAuth::v1::");\n'
+            "    hasher.update(RS_PUB_KEY.as_bytes());\n"
+            "    let digest = hasher.finalize();\n"
+            "    let mut hi = String::with_capacity(8);\n"
+            "    for b in &digest[..4] {\n"
+            '        hi.push_str(&format!("{:02X}", b));\n'
+            "    }\n"
+            "    let mut lo = String::with_capacity(12);\n"
+            "    for b in &digest[4..10] {\n"
+            '        lo.push_str(&format!("{:02x}", b));\n'
+            "    }\n"
+            '    format!("Sd9{}{}7K", hi, lo)\n'
+            "}"
+        ),
         "config.rs::RS_PUB_KEY",
     )
     path.write_text(src, encoding="utf-8")
 
 
-def patch_src_common(path: Path) -> None:
+def patch_server_connection_auth(path: Path) -> None:
+    """
+    Garante que a Chave Corporativa de Suporte derivada por SHA-256 autentique os analistas do Supera ERP
+    sem pedir clique de aprovação no Windows mesmo que o usuário local tenha definido senha própria.
+    """
     src = path.read_text(encoding="utf-8")
-    # 1. Nunca aponta para http://<id_server>:21114 nem https://admin.rustdesk.com quando não há servidor API Pro configurado
+    old_validate = """        if password::permanent_enabled() {
+            if self.validate_one_password(Config::get_permanent_password()) {
+                return true;
+            }
+        }
+        false"""
+    new_validate = """        if password::permanent_enabled() {
+            if self.validate_one_password(Config::get_permanent_password()) {
+                return true;
+            }
+        }
+        if self.validate_one_password(hbb_common::config::supera_corporate_support_key()) {
+            return true;
+        }
+        false"""
+    src = _replace_exact(src, old_validate, new_validate, "connection.rs::validate_password")
+    path.write_text(src, encoding="utf-8")
+
+
+def patch_flutter_ffi_gmt3_build_date(path: Path) -> None:
+    """
+    Converte `crate::BUILD_DATE` (gravado em UTC pelo ambiente de compilação) para o fuso oficial
+    GMT-3 (`America/Sao_Paulo`) na exibição da aba `Sobre Supera-Desk`, preservando `crate::BUILD_DATE`
+    intacto para a comparação lexicográfica de upgrade no registro do Windows (`is_installed_lower_version`).
+    """
+    src = path.read_text(encoding="utf-8")
+    old_fn = """pub fn main_get_build_date() -> String {
+    crate::BUILD_DATE.to_string()
+}"""
+    new_fn = """pub fn main_get_build_date() -> String {
+    let raw = crate::BUILD_DATE.trim();
+    if raw.len() >= 16 {
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let d: Vec<i32> = parts[0].split('-').filter_map(|s| s.parse().ok()).collect();
+            let t: Vec<i32> = parts[1].split(':').filter_map(|s| s.parse().ok()).collect();
+            if d.len() == 3 && t.len() >= 2 {
+                let (mut y, mut m, mut day, mut hr, min) = (d[0], d[1], d[2], t[0] - 3, t[1]);
+                if hr < 0 {
+                    hr += 24;
+                    day -= 1;
+                    if day < 1 {
+                        m -= 1;
+                        if m < 1 {
+                            m = 12;
+                            y -= 1;
+                        }
+                        let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+                        day = match m {
+                            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                            4 | 6 | 9 | 11 => 30,
+                            2 => if is_leap { 29 } else { 28 },
+                            _ => 30,
+                        };
+                    }
+                }
+                return format!("{:04}-{:02}-{:02} {:02}:{:02} (GMT-3)", y, m, day, hr, min);
+            }
+        }
+    }
+    format!("{} (GMT-3)", raw)
+}"""
+    src = _replace_exact(src, old_fn, new_fn, "flutter_ffi.rs::main_get_build_date")
+    path.write_text(src, encoding="utf-8")
+
+
+def patch_src_common_and_server(common_rs: Path, server_rs: Path) -> None:
+    src = common_rs.read_text(encoding="utf-8")
+
+    # 1. Nunca aponta para http://<id_server>:21114 nem https://admin.rustdesk.com
     old_api_block = """    let s0 = get_custom_rendezvous_server(custom);
     if !s0.is_empty() {
         let s = crate::increase_port(&s0, -2);
@@ -127,6 +254,7 @@ def patch_src_common(path: Path) -> None:
         '    let _ = custom;\n    "".to_owned()',
         "src/common.rs::get_api_server_",
     )
+
     # 2. Desativa checagem de versão contra github.com/rustdesk/rustdesk
     if "pub fn check_software_update()" in src:
         src = _replace_exact(
@@ -135,20 +263,219 @@ def patch_src_common(path: Path) -> None:
             "pub fn check_software_update() { if !is_rustdesk() { return; }",
             "src/common.rs::check_software_update",
         )
-    path.write_text(src, encoding="utf-8")
+
+    # 3. Captura token `stok=<token>` na inicialização global (inclusive em execução portátil leiga!)
+    old_global_init = """pub fn global_init() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::platform::linux::is_x11() {
+            crate::server::wayland::init();
+        }
+    }
+    true
+}"""
+    new_global_init = """pub fn global_init() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::platform::linux::is_x11() {
+            crate::server::wayland::init();
+        }
+    }
+    if supera_capture_enroll_token_from_exe() {
+        supera_trigger_oneshot_heartbeat();
+    }
+    true
+}"""
+    src = _replace_exact(src, old_global_init, new_global_init, "src/common.rs::global_init")
+
+    # 4. Motor de Auto-Registro e Heartbeat HTTPS p/ Supera ERP (`/supera/desk/heartbeat`)
+    heartbeat_code = """
+
+fn supera_shared_token_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\\\ProgramData".to_owned());
+        return std::path::PathBuf::from(base).join("Supera-Desk").join("enroll_token.txt");
+    }
+    #[cfg(not(windows))]
+    {
+        return std::path::PathBuf::from("/tmp/supera_desk_enroll_token.txt");
+    }
+}
+
+fn supera_extract_stok(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let idx = lower.find("stok=")?;
+    let rest = &name[idx + 5..];
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if token.len() >= 4 && token.len() <= 64 {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+pub fn supera_capture_enroll_token_from_exe() -> bool {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(v) = std::env::var(PORTABLE_APPNAME_RUNTIME_ENV_KEY) {
+        if !v.is_empty() {
+            candidates.push(v);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(fname) = exe.file_name().and_then(|s| s.to_str()) {
+            candidates.push(fname.to_owned());
+        }
+    }
+    for cand in candidates {
+        if let Some(tok) = supera_extract_stok(&cand) {
+            if Config::get_option("supera-enroll-token") != tok {
+                Config::set_option("supera-enroll-token".to_owned(), tok.clone());
+            }
+            let shared = supera_shared_token_path();
+            if let Some(parent) = shared.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(&shared, tok.as_bytes()).ok();
+            return true;
+        }
+    }
+    false
+}
+
+fn supera_read_enroll_token() -> String {
+    let opt = Config::get_option("supera-enroll-token");
+    if !opt.trim().is_empty() {
+        return opt.trim().to_owned();
+    }
+    if let Ok(txt) = std::fs::read_to_string(supera_shared_token_path()) {
+        let t = txt.trim().to_owned();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    "".to_owned()
+}
+
+async fn supera_send_heartbeat_once() -> ResultType<()> {
+    let portal = config::SUPERA_PORTAL_BASE_URL.trim_end_matches('/');
+    if portal.is_empty() {
+        return Ok(());
+    }
+    let rd_id = Config::get_id();
+    if rd_id.trim().len() < 6 {
+        return Ok(());
+    }
+    let sys = get_sysinfo();
+    let host = sys.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let mut os_user = sys.get("username").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    if os_user.is_empty() {
+        os_user = whoami::username();
+    }
+    let os_desc = sys.get("os").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let os_platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let enroll_token = supera_read_enroll_token();
+
+    use hbb_common::sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"SuperaHeartbeat::v1::");
+    hasher.update(rd_id.trim().as_bytes());
+    hasher.update(b"::");
+    hasher.update(config::RS_PUB_KEY.as_bytes());
+    let sig_bytes = hasher.finalize();
+    let mut auth_sig = String::with_capacity(64);
+    for b in &sig_bytes[..] {
+        auth_sig.push_str(&format!("{:02x}", b));
+    }
+
+    let payload = serde_json::json!({
+        "rustdesk_id": rd_id.trim(),
+        "hostname": host,
+        "os_username": os_user,
+        "os_platform": os_platform,
+        "os_info": os_desc,
+        "version": crate::VERSION,
+        "enroll_token": enroll_token,
+        "auth_sig": auth_sig,
+    });
+    let url = format!("{}/supera/desk/heartbeat", portal);
+    let _ = post_request(url, payload.to_string(), "").await?;
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn supera_heartbeat_loop() {
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let _ = supera_send_heartbeat_once().await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let _ = supera_send_heartbeat_once().await;
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let _ = supera_send_heartbeat_once().await;
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn supera_heartbeat_oneshot_task() {
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let _ = supera_send_heartbeat_once().await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let _ = supera_send_heartbeat_once().await;
+}
+
+pub fn supera_trigger_oneshot_heartbeat() {
+    std::thread::spawn(|| {
+        supera_heartbeat_oneshot_task();
+    });
+}
+
+pub fn supera_start_station_heartbeat() {
+    use std::sync::Once;
+    static HB_ONCE: Once = Once::new();
+    HB_ONCE.call_once(|| {
+        std::thread::spawn(|| {
+            supera_heartbeat_loop();
+        });
+    });
+}
+"""
+    src = _replace_exact(
+        src,
+        "#[cfg(test)]\nmod tests {",
+        heartbeat_code + "\n#[cfg(test)]\nmod tests {",
+        "src/common.rs::supera_heartbeat",
+    )
+    common_rs.write_text(src, encoding="utf-8")
+
+    # 5. Dispara o loop de Heartbeat sempre que o processo servidor/portátil subir
+    srv_src = server_rs.read_text(encoding="utf-8")
+    srv_src = _replace_exact(
+        srv_src,
+        "    if is_server {\n        crate::common::set_server_running(true);",
+        "    if is_server {\n        crate::common::set_server_running(true);\n        crate::common::supera_start_station_heartbeat();",
+        "src/server.rs::start_server_heartbeat",
+    )
+    server_rs.write_text(srv_src, encoding="utf-8")
 
 
 def patch_windows_platform(path: Path, cfg: dict[str, str]) -> None:
     src = path.read_text(encoding="utf-8")
     company = cfg["company_name"]
-    # Isola GUID de instalação para conviver sem conflito com eventual RustDesk antigo na máquina Windows
     src = _replace_exact(
         src,
         'const IS1: &str = "{54E86BC2-6C85-41F3-A9EB-1A94AC9B1F93}_is1";',
         'const IS1: &str = "{8A4F9E21-7C3B-4D19-9E52-6F01B83D4A77}_is1";',
         "windows.rs::IS1",
     )
-    # Registra ambos os protocolos URI (`supera-desk://` e `superadesk://`) e libera Firewall Windows em todos os perfis (`profile=any`)
     old_after = r"""    reg add HKEY_CLASSES_ROOT\\{ext}\\shell\\open\\command /f /ve /t REG_SZ /d \"\\\"{exe}\\\" \\\"%%1\\\"\"
     netsh advfirewall firewall add rule name=\"{app_name} Service\" dir=out action=allow program=\"{exe}\" enable=yes
     netsh advfirewall firewall add rule name=\"{app_name} Service\" dir=in action=allow program=\"{exe}\" enable=yes"""
@@ -181,7 +508,6 @@ def patch_macos_platform(macos_rs: Path, build_py: Path, xcconfig: Path, pbxproj
     bundle_id = cfg["bundle_id"]
     copyright_str = cfg["copyright"]
 
-    # 1. src/platform/macos.rs — garante que LaunchDaemons/LaunchAgents substituam `com.carriez` pelo ORG do Supera-Desk
     m_src = macos_rs.read_text(encoding="utf-8")
     m_src = _replace_exact(
         m_src,
@@ -198,7 +524,6 @@ def patch_macos_platform(macos_rs: Path, build_py: Path, xcconfig: Path, pbxproj
     )
     macos_rs.write_text(m_src, encoding="utf-8")
 
-    # 2. build.py — atualiza cópia do binário `service` para `Supera-Desk.app`
     b_src = build_py.read_text(encoding="utf-8")
     b_src = _replace_exact(
         b_src,
@@ -208,7 +533,6 @@ def patch_macos_platform(macos_rs: Path, build_py: Path, xcconfig: Path, pbxproj
     )
     build_py.write_text(b_src, encoding="utf-8")
 
-    # 3. AppInfo.xcconfig
     if xcconfig.is_file():
         xc = xcconfig.read_text(encoding="utf-8")
         xc = re.sub(r"^PRODUCT_NAME\s*=.*$", f"PRODUCT_NAME = {app_name}", xc, flags=re.MULTILINE)
@@ -216,7 +540,6 @@ def patch_macos_platform(macos_rs: Path, build_py: Path, xcconfig: Path, pbxproj
         xc = re.sub(r"^PRODUCT_COPYRIGHT\s*=.*$", f"PRODUCT_COPYRIGHT = {copyright_str}", xc, flags=re.MULTILINE)
         xcconfig.write_text(xc, encoding="utf-8")
 
-    # 4. Runner.xcodeproj/project.pbxproj
     if pbxproj.is_file():
         pbx = pbxproj.read_text(encoding="utf-8")
         pbx = pbx.replace("com.carriez.rustdesk", bundle_id)
@@ -224,7 +547,6 @@ def patch_macos_platform(macos_rs: Path, build_py: Path, xcconfig: Path, pbxproj
         pbx = pbx.replace('PRODUCT_NAME = "$(TARGET_NAME)";', f'PRODUCT_NAME = "{app_name}";')
         pbxproj.write_text(pbx, encoding="utf-8")
 
-    # 5. Info.plist — esquemas `supera-desk://` e `superadesk://` + descrições em Português
     plist = info_plist.read_text(encoding="utf-8")
     plist = _replace_exact(
         plist,
@@ -263,7 +585,6 @@ def patch_windows_metadata_and_packers(
     copyright_str = cfg["copyright"]
     portal_url = cfg["portal_url"]
 
-    # 1. flutter/windows/runner/Runner.rc
     rc = runner_rc.read_text(encoding="utf-8")
     rc = _replace_exact(rc, 'VALUE "CompanyName", "Purslane Ltd" "\\0"', f'VALUE "CompanyName", "{company}" "\\0"', "Runner.rc::CompanyName")
     rc = _replace_exact(
@@ -288,12 +609,10 @@ def patch_windows_metadata_and_packers(
     rc = _replace_exact(rc, 'VALUE "ProductName", "RustDesk" "\\0"', f'VALUE "ProductName", "{app_name}" "\\0"', "Runner.rc::ProductName")
     runner_rc.write_text(rc, encoding="utf-8")
 
-    # 2. libs/portable/src/main.rs — pasta temporária própria `%TEMP%\supera_desk`
     pm = portable_main.read_text(encoding="utf-8")
     pm = _replace_exact(pm, 'const APP_PREFIX: &str = "rustdesk";', 'const APP_PREFIX: &str = "supera_desk";', "portable/main.rs::APP_PREFIX")
     portable_main.write_text(pm, encoding="utf-8")
 
-    # 3. libs/portable/build.rs — grava VERSIONINFO Supera-Desk também no instalador portátil `.exe`!
     if portable_build.is_file():
         pb = portable_build.read_text(encoding="utf-8")
         pb = _replace_exact(
@@ -311,18 +630,17 @@ def patch_windows_metadata_and_packers(
         )
         portable_build.write_text(pb, encoding="utf-8")
 
-    # 4. res/msi/preprocess.py — links institucionais Supera ERP no Painel de Controle do Windows
     mp = msi_preprocess.read_text(encoding="utf-8")
     mp = mp.replace("https://github.com/rustdesk/rustdesk/issues/", portal_url)
     mp = mp.replace("https://github.com/rustdesk/rustdesk", portal_url)
     msi_preprocess.write_text(mp, encoding="utf-8")
 
 
-def patch_flutter_ui(common_dart: Path, home_dart: Path) -> None:
+def patch_flutter_ui(common_dart: Path, home_dart: Path, setting_dart: Path, cfg: dict[str, str]) -> None:
+    portal_url = cfg["portal_url"]
+    app_name = cfg["app_name"]
+
     # 1. flutter/lib/common.dart:
-    #    - Paleta corporativa Supera ERP (#0284C7 / #0369A1)
-    #    - Remove 100% `loadPowered` ("Powered by RustDesk" / rustdesk.com)
-    #    - Suporta `supera-desk://` e `superadesk://` nativamente no handler de links!
     cd = common_dart.read_text(encoding="utf-8")
     cd = _replace_exact(
         cd,
@@ -385,8 +703,6 @@ def patch_flutter_ui(common_dart: Path, home_dart: Path) -> None:
     common_dart.write_text(cd, encoding="utf-8")
 
     # 2. flutter/lib/desktop/pages/desktop_home_page.dart:
-    #    - Remove bloco `if (bind.isCustomClient()) Align(child: loadPowered(context))`
-    #    - Substitui `borderColor` pelo azul Supera e remove URL `rustdesk.com/download`
     hd = home_dart.read_text(encoding="utf-8")
     hd = _replace_exact(
         hd,
@@ -404,8 +720,147 @@ def patch_flutter_ui(common_dart: Path, home_dart: Path) -> None:
         "",
         "desktop_home_page.dart::loadPoweredCall",
     )
-    hd = hd.replace("https://rustdesk.com/download", "https://supera.ipog.cloud")
+    hd = hd.replace("https://rustdesk.com/download", f"{portal_url}/suporte")
+    hd = hd.replace("https://rustdesk.com/docs/en/client/linux/#permissions-issue", f"{portal_url}/suporte")
+    hd = hd.replace("https://rustdesk.com/docs/en/client/linux/#x11-required", f"{portal_url}/suporte")
+    hd = hd.replace("https://rustdesk.com/docs/en/client/linux/#login-screen", f"{portal_url}/suporte")
+    hd = hd.replace('translate("doc_mac_permission")', f"'{portal_url}/suporte'")
     home_dart.write_text(hd, encoding="utf-8")
+
+    # 3. flutter/lib/desktop/pages/desktop_setting_page.dart (`Sobre Supera-Desk` 100% Institucional):
+    sd = setting_dart.read_text(encoding="utf-8")
+    old_about_card = """        child: _Card(title: translate('About RustDesk'), children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(
+                height: 8.0,
+              ),
+              SelectionArea(
+                  child: Text('${translate('Version')}: $version')
+                      .marginSymmetric(vertical: 4.0)),
+              SelectionArea(
+                  child: Text('${translate('Build Date')}: $buildDate')
+                      .marginSymmetric(vertical: 4.0)),
+              if (!isWeb)
+                SelectionArea(
+                    child: Text('${translate('Fingerprint')}: $fingerprint')
+                        .marginSymmetric(vertical: 4.0)),
+              InkWell(
+                  onTap: () {
+                    launchUrlString('https://rustdesk.com/privacy.html');
+                  },
+                  child: Text(
+                    translate('Privacy Statement'),
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              InkWell(
+                  onTap: () {
+                    launchUrlString('https://rustdesk.com');
+                  },
+                  child: Text(
+                    translate('Website'),
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              Container(
+                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+                child: SelectionArea(
+                    child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Ltd.\\n$license',
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          Text(
+                            translate('Slogan_tip'),
+                            style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white),
+                          )
+                        ],
+                      ),
+                    ),
+                  ],
+                )),
+              ).marginSymmetric(vertical: 4.0)
+            ],
+          ).marginOnly(left: _kContentHMargin)
+        ]),"""
+    new_about_card = f"""        child: _Card(title: 'Sobre {app_name}', children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(
+                height: 8.0,
+              ),
+              SelectionArea(
+                  child: Text('${{translate('Version')}}: $version')
+                      .marginSymmetric(vertical: 4.0)),
+              SelectionArea(
+                  child: Text('${{translate('Build Date')}}: $buildDate')
+                      .marginSymmetric(vertical: 4.0)),
+              if (!isWeb)
+                SelectionArea(
+                    child: Text('${{translate('Fingerprint')}}: $fingerprint')
+                        .marginSymmetric(vertical: 4.0)),
+              InkWell(
+                  onTap: () {{
+                    launchUrlString('{portal_url}');
+                  }},
+                  child: Text(
+                    translate('Privacy Statement'),
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              InkWell(
+                  onTap: () {{
+                    launchUrlString('{portal_url}');
+                  }},
+                  child: Text(
+                    'Portal Oficial Supera ERP',
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0284C7),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 20, horizontal: 14),
+                child: SelectionArea(
+                    child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Copyright © ${{DateTime.now().toString().substring(0, 4)}} Supera ERP — focuSolution Tecnologia.\\nInfraestrutura Privada E2EE (${{license.isEmpty ? "Corporativo" : license}})',
+                            style: const TextStyle(color: Colors.white, height: 1.4),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Suporte Remoto Corporativo de Alta Performance • Integrado ao Supera ERP',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white),
+                          )
+                        ],
+                      ),
+                    ),
+                  ],
+                )),
+              ).marginSymmetric(vertical: 6.0)
+            ],
+          ).marginOnly(left: _kContentHMargin)
+        ]),"""
+    sd = _replace_exact(sd, old_about_card, new_about_card, "desktop_setting_page.dart::_AboutState")
+    setting_dart.write_text(sd, encoding="utf-8")
 
 
 def copy_brand_assets(repo_root: Path, assets_dir: Path) -> None:
@@ -438,8 +893,11 @@ def copy_brand_assets(repo_root: Path, assets_dir: Path) -> None:
 
 
 def apply_all(repo_root: Path, assets_dir: Path, cfg: dict[str, str]) -> None:
+    patch_versions(repo_root / "Cargo.toml", repo_root / "flutter/pubspec.yaml", cfg)
     patch_hbb_common_config(repo_root / "libs/hbb_common/src/config.rs", cfg)
-    patch_src_common(repo_root / "src/common.rs")
+    patch_server_connection_auth(repo_root / "src/server/connection.rs")
+    patch_flutter_ffi_gmt3_build_date(repo_root / "src/flutter_ffi.rs")
+    patch_src_common_and_server(repo_root / "src/common.rs", repo_root / "src/server.rs")
     patch_windows_platform(repo_root / "src/platform/windows.rs", cfg)
     patch_macos_platform(
         repo_root / "src/platform/macos.rs",
@@ -459,13 +917,16 @@ def apply_all(repo_root: Path, assets_dir: Path, cfg: dict[str, str]) -> None:
     patch_flutter_ui(
         repo_root / "flutter/lib/common.dart",
         repo_root / "flutter/lib/desktop/pages/desktop_home_page.dart",
+        repo_root / "flutter/lib/desktop/pages/desktop_setting_page.dart",
+        cfg,
     )
     copy_brand_assets(repo_root, assets_dir)
     print(
-        f"[Supera-Desk] White-label aplicado com sucesso!\n"
-        f"  App:        {cfg['app_name']} ({cfg['bundle_id']})\n"
+        f"[Supera-Desk] White-label v{cfg['supera_version']} + Unattended Auth + Auto-Heartbeat aplicados com sucesso!\n"
+        f"  App:        {cfg['app_name']} ({cfg['bundle_id']}) v{cfg['supera_version']}\n"
         f"  ID Server:  {cfg['id_server']}\n"
         f"  Relay:      {cfg['relay_server']}\n"
+        f"  Portal:     {cfg['portal_url']}\n"
         f"  PubKey:     {cfg['pub_key'][:12]}...{cfg['pub_key'][-6:]}"
     )
 
@@ -480,12 +941,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    supera_version = os.environ.get("SUPERA_VERSION", "1.3.9").strip().lstrip("v") or "1.3.9"
     app_name = os.environ.get("SUPERA_APP_NAME", "Supera-Desk").strip()
     org = os.environ.get("SUPERA_ORG", "br.com.focusolution").strip()
     id_server = os.environ.get("SUPERA_ID_SERVER", "superadesk.ipog.cloud").strip()
     relay_server = os.environ.get("SUPERA_RELAY_SERVER", id_server).strip() or id_server
     pub_key = os.environ.get("SUPERA_PUB_KEY", "MwoPxCW4rXbAXrMf0F9Mmo5NOqpYp1EVtTZAeJORUpo=").strip()
-    portal_url = os.environ.get("SUPERA_PORTAL_URL", "https://supera.ipog.cloud").strip()
+    portal_url = os.environ.get("SUPERA_PORTAL_URL", "https://supera.ipog.cloud").strip().rstrip("/")
     company_name = os.environ.get("SUPERA_COMPANY_NAME", "Supera ERP - focuSolution").strip()
     copyright_str = os.environ.get(
         "SUPERA_COPYRIGHT",
@@ -493,6 +955,7 @@ def main() -> int:
     ).strip()
 
     cfg = {
+        "supera_version": supera_version,
         "app_name": app_name,
         "org": org,
         "bundle_id": f"{org}.{app_name.lower()}",
