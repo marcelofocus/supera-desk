@@ -246,8 +246,11 @@ jobs:
         working-directory: rustdesk-src
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         shell: bash
         run: |
+          curl -fsSL https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/cmake/vcpkg_acquire_msys.cmake \
+            -o "$VCPKG_ROOT/scripts/cmake/vcpkg_acquire_msys.cmake"
           "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Build Supera-Desk Core & Flutter Runner
@@ -332,7 +335,7 @@ jobs:
   build-macos-arm64:
     name: "Supera-Desk macOS Apple Silicon (.DMG)"
     needs: [generate-bridge]
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Export GitHub Actions Cache Variables
         uses: actions/github-script@v7
@@ -366,14 +369,18 @@ jobs:
           name: bridge-artifact
           path: rustdesk-src
 
-      - name: Install Build Dependencies (Homebrew)
+      - name: Install Build Dependencies (Homebrew + NASM 2.16)
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          for pkg in llvm create-dmg nasm cmake wget ninja pkg-config; do
+          for pkg in llvm create-dmg cmake wget ninja pkg-config; do
             brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
           done
+          curl -fsSL https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip -o /tmp/nasm.zip
+          unzip -q -o /tmp/nasm.zip -d /tmp
+          sudo cp /tmp/nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -413,6 +420,7 @@ jobs:
         working-directory: rustdesk-src
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-osx
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx --x-install-root="$VCPKG_ROOT/installed"
 
