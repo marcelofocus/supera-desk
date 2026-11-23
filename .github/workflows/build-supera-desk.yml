@@ -312,10 +312,10 @@ jobs:
           & $signtool sign /fd SHA256 /f cert.pfx /p $env:PFX_PASS /tr http://timestamp.digicert.com /td SHA256 .\dist_win\Supera-Desk.exe .\dist_win\librustdesk.dll
           Remove-Item cert.pfx -Force
 
-      - name: Pack Single-File Supera-Desk-Setup-Win64.exe & Corporate .MSI
+      - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Generate Supera-Desk-Setup-Win64.exe and Supera-Desk-Win64.msi
+      - name: Generate Supera-Desk-Setup-Win64.exe
         working-directory: rustdesk-src
         shell: bash
         run: |
@@ -327,13 +327,15 @@ jobs:
           mkdir -p ../out-windows
           cp ./target/release/rustdesk-portable-packer.exe ../out-windows/Supera-Desk-Setup-Win64.exe
 
-          pushd ./res/msi
+      - name: Generate Supera-Desk-Win64.msi
+        working-directory: rustdesk-src/res/msi
+        shell: pwsh
+        run: |
           python preprocess.py --arp --app-name Supera-Desk -d ../../dist_win
           nuget restore msi.sln
-          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
-          cp ./Package/bin/x64/Release/en-us/Package.msi ../../../out-windows/Supera-Desk-Win64.msi
-          popd
-          ls -lh ../out-windows/
+          msbuild.exe msi.sln -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10
+          Copy-Item ./Package/bin/x64/Release/en-us/Package.msi ../../../out-windows/Supera-Desk-Win64.msi -Force
+          Get-ChildItem ../../../out-windows/
 
       - name: Optional Authenticode Signing (Outer Setup .EXE & .MSI)
         if: env.WINDOWS_PFX_BASE64 != ''
